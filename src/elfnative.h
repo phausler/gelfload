@@ -1,7 +1,7 @@
 #ifndef ELFNATIVE_H
 #define ELFNATIVE_H
 
-#include "../config.h"
+#include "config.h"
 #include "elfload_elf.h"
 
 #if SIZEOF_VOID_P == 4
