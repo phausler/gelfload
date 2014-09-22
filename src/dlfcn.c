@@ -22,8 +22,8 @@ char *elfload_dlerror(void) { return dlLastError; }
 
 void *elfload_dlsym(void *handle, const char *symbol)
 {
-    void *sym = findELFSymbol(symbol, (struct ELF_File *) handle, -1, -1, NULL);
-    
+    void *sym = findELFSymbol(symbol, (struct ELF_File *) handle, -1, -1);
+
     if (sym == NULL) {
         dlLastError = "Symbol undefined.";
     }

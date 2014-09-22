@@ -73,5 +73,12 @@ int main(int argc, char **argv, char **envp)
     newstack[i-progarg+argc+2] = NULL;
 
     /* and call it */
-    WITHSTACK_JMP(newstack, f->ehdr->e_entry + f->offset);
+    if (f->ehdr32) {
+        WITHSTACK_JMP(newstack, f->ehdr32->e_entry + f->offset);
+    } else if (f->ehdr64) {
+        WITHSTACK_JMP(newstack, f->ehdr64->e_entry + f->offset);
+    } else {
+        return 1;
+    }
+
 }

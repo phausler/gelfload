@@ -17,11 +17,12 @@ struct ELF_File {
     char hostlib;
 
     /* the complete program, in memory */
-    void *prog;
+    uint8_t *prog;
     size_t proglen;
 
     /* same pointer, actually */
-    ElfNative_Ehdr *ehdr;
+    Elf32_Ehdr *ehdr32;
+    Elf64_Ehdr *ehdr64;
 
     /* the size in memory of this file */
     ssize_t memsz;
@@ -36,25 +37,34 @@ struct ELF_File {
     ssize_t offset;
 
     /* the dynamic entries table */
-    ElfNative_Dyn *dynamic;
+    Elf32_Dyn *dynamic32;
+    Elf64_Dyn *dynamic64;
 
     /* the string table */
     char *strtab;
 
     /* and symbol table */
-    ElfNative_Sym *symtab;
+    Elf32_Sym *symtab32;
+    Elf64_Sym *symtab64;
 
     /* with its associated hash table */
-    ElfNative_Word *hashtab;
-#define ELFFILE_NBUCKET(f) ((f)->hashtab[0])
-#define ELFFILE_NCHAIN(f) ((f)->hashtab[1])
-#define ELFFILE_BUCKET(f, i) ((f)->hashtab[(i) + 2])
-#define ELFFILE_CHAIN(f, i) ((f)->hashtab[(i) + ELFFILE_NBUCKET(f) + 2])
+    Elf32_Word *hashtab32;
+    Elf64_Word *hashtab64;
+#define ELFFILE_NBUCKET32(f) ((f)->hashtab32[0])
+#define ELFFILE_NBUCKET64(f) ((f)->hashtab64[0])
+#define ELFFILE_NCHAIN32(f) ((f)->hashtab32[1])
+#define ELFFILE_NCHAIN64(f) ((f)->hashtab64[1])
+#define ELFFILE_BUCKET32(f, i) ((f)->hashtab32[(i) + 2])
+#define ELFFILE_BUCKET64(f, i) ((f)->hashtab64[(i) + 2])
+#define ELFFILE_CHAIN32(f, i) ((f)->hashtab32[(i) + ELFFILE_NBUCKET32(f) + 2])
+#define ELFFILE_CHAIN64(f, i) ((f)->hashtab64[(i) + ELFFILE_NBUCKET64(f) + 2])
 
     /* relocation table(s) */
-    ElfNative_Rel *rel;
+    Elf32_Rel *rel32;
+    Elf64_Rel *rel64;
     size_t relsz;
-    ElfNative_Rela *rela;
+    Elf32_Rela *rela32;
+    Elf64_Rela *rela64;
     size_t relasz;
     void *jmprel;
     size_t jmprelsz;
@@ -66,8 +76,12 @@ void relocateELF(int fileNo, struct ELF_File *f);
 void initELF(struct ELF_File *except);
 void readFile(const char *nm, const char *instdir, struct ELF_File *ef);
 void closeFile(struct ELF_File *ef);
-void *findELFSymbol(const char *nm, struct ELF_File *onlyin, int localin, int notin,
-                    ElfNative_Sym **syminto);
-ElfNative_Word elf_hash(const unsigned char *name);
+void *findELFSymbol(const char *nm, struct ELF_File *onlyin, int localin, int notin);
+void *findELFSymbol32(const char *nm, struct ELF_File *onlyin, int localin, int notin,
+                    Elf32_Sym **syminto);
+void *findELFSymbol64(const char *nm, struct ELF_File *onlyin, int localin, int notin,
+                    Elf64_Sym **syminto);
+Elf32_Word elf_hash32(const unsigned char *name);
+Elf64_Word elf_hash64(const unsigned char *name);
 
 #endif

@@ -43,8 +43,10 @@ struct ELF_File *loadELF(const char *nm, const char *instdir, int maybe)
     int i, fileNo, phdri;
     struct ELF_File *f;
     void *curphdrl;
-    ElfNative_Phdr *curphdr;
-    ElfNative_Dyn *curdyn;
+    Elf32_Phdr *curphdr32;
+    Elf64_Phdr *curphdr64;
+    Elf32_Dyn *curdyn32;
+    Elf64_Dyn *curdyn64;
 
     /* first, make sure it's not already loaded or loading */
     for (i = 0; i < elfFileCount; i++) {
@@ -124,8 +126,7 @@ struct ELF_File *loadELF(const char *nm, const char *instdir, int maybe)
     readFile(nm, instdir, f);
 
     /* make sure it's an ELF file */
-    f->ehdr = (ElfNative_Ehdr *) f->prog;
-    if (memcmp(f->ehdr->e_ident, ELFMAG, SELFMAG) != 0) {
+    if (memcmp(f->prog, ELFMAG, SELFMAG) != 0) {
         if (!maybe) {
             fprintf(stderr, "%s does not appear to be an ELF file.\n", nm);
             exit(1);
@@ -133,135 +134,235 @@ struct ELF_File *loadELF(const char *nm, const char *instdir, int maybe)
             return NULL;
         }
     }
-
-    /* only native-bit supported for the moment */
-    if ((SIZEOF_VOID_P == 4 && f->ehdr->e_ident[EI_CLASS] != ELFCLASS32) ||
-        (SIZEOF_VOID_P == 8 && f->ehdr->e_ident[EI_CLASS] != ELFCLASS64)) {
+    
+    if (f->prog[EI_CLASS] == ELFCLASS32) {
+        f->ehdr32 = (Elf32_Ehdr *)f->prog;
+    } else if (f->prog[EI_CLASS] == ELFCLASS64) {
+        f->ehdr64 = (Elf64_Ehdr *)f->prog;
+    } else {
         if (!maybe) {
-            fprintf(stderr, "%s is not a %d-bit ELF file.\n", nm, SIZEOF_VOID_P * 8);
+            fprintf(stderr, "%s does not appear to be a supported ELF file (32/64 bit).\n", nm);
             exit(1);
         } else {
             return NULL;
         }
     }
-
+    
     /* FIXME: check endianness */
 
     /* must be an executable or .so to be loaded */
-    if (f->ehdr->e_type != ET_EXEC &&
-        f->ehdr->e_type != ET_DYN) {
-        if (!maybe) {
-            fprintf(stderr, "%s is not an executable or shared object file.\n", nm);
-            exit(1);
-        } else {
-            return NULL;
+    if (f->ehdr32) {
+        if (f->ehdr32->e_type != ET_EXEC &&
+            f->ehdr32->e_type != ET_DYN) {
+            if (!maybe) {
+                fprintf(stderr, "%s is not an executable or shared object file.\n", nm);
+                exit(1);
+            } else {
+                return NULL;
+            }
+        }
+    } else {
+        if (f->ehdr64->e_type != ET_EXEC &&
+            f->ehdr64->e_type != ET_DYN) {
+            if (!maybe) {
+                fprintf(stderr, "%s is not an executable or shared object file.\n", nm);
+                exit(1);
+            } else {
+                return NULL;
+            }
         }
     }
 
     /* now go through program headers, to find the allocation space of this file */
     f->min = (void *) -1;
     f->max = 0;
-    curphdrl = f->prog + f->ehdr->e_phoff - f->ehdr->e_phentsize;
+    if (f->ehdr32) {
+        curphdrl = f->prog + f->ehdr32->e_phoff - f->ehdr32->e_phentsize;
+    } else {
+        curphdrl = f->prog + f->ehdr64->e_phoff - f->ehdr64->e_phentsize;
+    }
 
-    for (phdri = 0; phdri < f->ehdr->e_phnum; phdri++) {
-        curphdrl += f->ehdr->e_phentsize;
-        curphdr = (ElfNative_Phdr *) curphdrl;
 
-        /* perhaps check its location */
-        if (curphdr->p_type == PT_LOAD) {
-            /* adjust min/max */
-            if ((void *) curphdr->p_vaddr < f->min) {
-                f->min = (void *) curphdr->p_vaddr;
+    for (phdri = 0; phdri < (f->ehdr32 ? f->ehdr32->e_phnum : f->ehdr64->e_phnum); phdri++) {
+        curphdrl += (f->ehdr32 ? f->ehdr32->e_phentsize : f->ehdr64->e_phentsize);
+        if (f->ehdr32) {
+            curphdr32 = (Elf32_Phdr *) curphdrl;
+            /* perhaps check its location */
+            if (curphdr32->p_type == PT_LOAD) {
+                /* adjust min/max */
+                if ((void *) curphdr32->p_vaddr < f->min) {
+                    f->min = (void *) curphdr32->p_vaddr;
+                }
+                if ((void *) curphdr32->p_vaddr + curphdr32->p_memsz > f->max) {
+                    f->max = (void *) curphdr32->p_vaddr + curphdr32->p_memsz;
+                }
+                
+            } else if (maybe && curphdr32->p_type == PT_INTERP) {
+                /* if we're only maybe-loading, check the loader */
+                if (strcmp((char *) (f->prog + curphdr32->p_offset), "/usr/bin/gelfload-ld")) {
+                    /* wrong loader! */
+                    return NULL;
+                }
             }
-            if ((void *) curphdr->p_vaddr + curphdr->p_memsz > f->max) {
-                f->max = (void *) curphdr->p_vaddr + curphdr->p_memsz;
+        } else {
+            curphdr64 = (Elf64_Phdr *) curphdrl;
+            /* perhaps check its location */
+            if (curphdr64->p_type == PT_LOAD) {
+                /* adjust min/max */
+                if ((void *) curphdr64->p_vaddr < f->min) {
+                    f->min = (void *) curphdr64->p_vaddr;
+                }
+                if ((void *) curphdr64->p_vaddr + curphdr64->p_memsz > f->max) {
+                    f->max = (void *) curphdr64->p_vaddr + curphdr64->p_memsz;
+                }
+                
+            } else if (maybe && curphdr64->p_type == PT_INTERP) {
+                /* if we're only maybe-loading, check the loader */
+                if (strcmp((char *) (f->prog + curphdr64->p_offset), "/usr/bin/gelfload-ld")) {
+                    /* wrong loader! */
+                    return NULL;
+                }
             }
-
-        } else if (maybe && curphdr->p_type == PT_INTERP) {
-            /* if we're only maybe-loading, check the loader */
-            if (strcmp((char *) (f->prog + curphdr->p_offset), "/usr/bin/gelfload-ld")) {
-                /* wrong loader! */
-                return NULL;
-            }
-
         }
+
+        
     }
 
     /* with this size info, we can allocate the space */
     f->memsz = f->max - f->min;
     
     /* if this is a binary, try to allocate it in place. elfload is addressed above 0x18000000 */
+#if !__APPLE__
     if (f->ehdr->e_type == ET_EXEC && f->max < (void *) 0x18000000) {
         f->loc = bbuffer(f->min, f->memsz);
 
     } else {
+#endif
         f->loc = bbuffer(NULL, f->memsz);
-
+#if !__APPLE__
     }
+#endif
     memset(f->loc, 0, f->memsz);
 
     f->offset = f->loc - f->min;
 
     /* we have the space, so load it in */
-    curphdrl = f->prog + f->ehdr->e_phoff - f->ehdr->e_phentsize;
-    for (phdri = 0; phdri < f->ehdr->e_phnum; phdri++) {
-        curphdrl += f->ehdr->e_phentsize;
-        curphdr = (ElfNative_Phdr *) curphdrl;
-
-        /* perhaps load it in */
-        if (curphdr->p_type == PT_LOAD) {
-            if (curphdr->p_filesz > 0) {
-                /* OK, there's something to copy in, so do so */
-                memcpy((void *) curphdr->p_vaddr + f->offset,
-                       f->prog + curphdr->p_offset,
-                       curphdr->p_filesz);
+    if (f->ehdr32) {
+        curphdrl = f->prog + f->ehdr32->e_phoff - f->ehdr32->e_phentsize;
+        for (phdri = 0; phdri < f->ehdr32->e_phnum; phdri++) {
+            curphdrl += f->ehdr32->e_phentsize;
+            curphdr32 = (Elf32_Phdr *) curphdrl;
+            
+            /* perhaps load it in */
+            if (curphdr32->p_type == PT_LOAD) {
+                if (curphdr32->p_filesz > 0) {
+                    /* OK, there's something to copy in, so do so */
+                    memcpy((void *) curphdr32->p_vaddr + f->offset,
+                           f->prog + curphdr32->p_offset,
+                           curphdr32->p_filesz);
+                }
+                
+            } else if (curphdr32->p_type == PT_DYNAMIC) {
+                /* we need this to load in dependencies, et cetera */
+                f->dynamic32 = (Elf32_Dyn *) (f->prog + curphdr32->p_offset);
+                
             }
-
-        } else if (curphdr->p_type == PT_DYNAMIC) {
-            /* we need this to load in dependencies, et cetera */
-            f->dynamic = (ElfNative_Dyn *) (f->prog + curphdr->p_offset);
-
+        }
+    } else {
+        curphdrl = f->prog + f->ehdr64->e_phoff - f->ehdr64->e_phentsize;
+        for (phdri = 0; phdri < f->ehdr64->e_phnum; phdri++) {
+            curphdrl += f->ehdr64->e_phentsize;
+            curphdr64 = (Elf64_Phdr *) curphdrl;
+            
+            /* perhaps load it in */
+            if (curphdr64->p_type == PT_LOAD) {
+                if (curphdr64->p_filesz > 0) {
+                    /* OK, there's something to copy in, so do so */
+                    memcpy((void *) curphdr64->p_vaddr + f->offset,
+                           f->prog + curphdr64->p_offset,
+                           curphdr64->p_filesz);
+                }
+                
+            } else if (curphdr64->p_type == PT_DYNAMIC) {
+                /* we need this to load in dependencies, et cetera */
+                f->dynamic64 = (Elf64_Dyn *) (f->prog + curphdr64->p_offset);
+                
+            }
         }
     }
     
     /* now go through dynamic entries, looking for basic vital info */
-    for (curdyn = f->dynamic; curdyn && curdyn->d_tag != DT_NULL; curdyn++) {
-        if (curdyn->d_tag == DT_STRTAB) {
-            f->strtab = (char *) (curdyn->d_un.d_ptr + f->offset);
-
-        } else if (curdyn->d_tag == DT_SYMTAB) {
-            f->symtab = (ElfNative_Sym *) (curdyn->d_un.d_ptr + f->offset);
-
-        } else if (curdyn->d_tag == DT_HASH) {
-            f->hashtab = (ElfNative_Word *) (curdyn->d_un.d_ptr + f->offset);
-
-        } else if (curdyn->d_tag == DT_RELA) {
-            f->rela = (ElfNative_Rela *) (curdyn->d_un.d_ptr + f->offset);
-
-        } else if (curdyn->d_tag == DT_RELASZ) {
-            f->relasz = curdyn->d_un.d_val;
-
-        } else if (curdyn->d_tag == DT_REL) {
-            f->rel = (ElfNative_Rel *) (curdyn->d_un.d_ptr + f->offset);
-
-        } else if (curdyn->d_tag == DT_RELSZ) {
-            f->relsz = curdyn->d_un.d_val;
-
-        } else if (curdyn->d_tag == DT_JMPREL) {
-            f->jmprel = (void *) (curdyn->d_un.d_ptr + f->offset);
-
-        } else if (curdyn->d_tag == DT_PLTRELSZ) {
-            f->jmprelsz = curdyn->d_un.d_val;
-
+    if (f->ehdr32) {
+        for (curdyn32 = f->dynamic32; curdyn32 && curdyn32->d_tag != DT_NULL; curdyn32++) {
+            if (curdyn32->d_tag == DT_STRTAB) {
+                f->strtab = (char *) (curdyn32->d_un.d_ptr + f->offset);
+                
+            } else if (curdyn32->d_tag == DT_SYMTAB) {
+                f->symtab32 = (Elf32_Sym *) (curdyn32->d_un.d_ptr + f->offset);
+                
+            } else if (curdyn32->d_tag == DT_HASH) {
+                f->hashtab32 = (Elf32_Word *) (curdyn32->d_un.d_ptr + f->offset);
+                
+            } else if (curdyn32->d_tag == DT_RELA) {
+                f->rela32 = (Elf32_Rela *) (curdyn32->d_un.d_ptr + f->offset);
+                
+            } else if (curdyn32->d_tag == DT_RELASZ) {
+                f->relasz = curdyn32->d_un.d_val;
+                
+            } else if (curdyn32->d_tag == DT_REL) {
+                f->rel32 = (Elf32_Rel *) (curdyn32->d_un.d_ptr + f->offset);
+                
+            } else if (curdyn32->d_tag == DT_RELSZ) {
+                f->relsz = curdyn32->d_un.d_val;
+                
+            } else if (curdyn32->d_tag == DT_JMPREL) {
+                f->jmprel = (void *) (curdyn32->d_un.d_ptr + f->offset);
+                
+            } else if (curdyn32->d_tag == DT_PLTRELSZ) {
+                f->jmprelsz = curdyn32->d_un.d_val;
+                
+            }
+        }
+    } else {
+        for (curdyn64 = f->dynamic64; curdyn64 && curdyn64->d_tag != DT_NULL; curdyn64++) {
+            if (curdyn64->d_tag == DT_STRTAB) {
+                f->strtab = (char *) (curdyn64->d_un.d_ptr + f->offset);
+                
+            } else if (curdyn64->d_tag == DT_SYMTAB) {
+                f->symtab64 = (Elf64_Sym *) (curdyn64->d_un.d_ptr + f->offset);
+                
+            } else if (curdyn64->d_tag == DT_HASH) {
+                f->hashtab64 = (Elf64_Word *) (curdyn64->d_un.d_ptr + f->offset);
+                
+            } else if (curdyn64->d_tag == DT_RELA) {
+                f->rela64 = (Elf64_Rela *) (curdyn64->d_un.d_ptr + f->offset);
+                
+            } else if (curdyn64->d_tag == DT_RELASZ) {
+                f->relasz = curdyn64->d_un.d_val;
+                
+            } else if (curdyn64->d_tag == DT_REL) {
+                f->rel64 = (Elf64_Rel *) (curdyn64->d_un.d_ptr + f->offset);
+                
+            } else if (curdyn64->d_tag == DT_RELSZ) {
+                f->relsz = curdyn64->d_un.d_val;
+                
+            } else if (curdyn64->d_tag == DT_JMPREL) {
+                f->jmprel = (void *) (curdyn64->d_un.d_ptr + f->offset);
+                
+            } else if (curdyn64->d_tag == DT_PLTRELSZ) {
+                f->jmprelsz = curdyn64->d_un.d_val;
+                
+            }
         }
     }
+    
 
     /* load in dependencies */
-    for (curdyn = f->dynamic; curdyn && curdyn->d_tag != DT_NULL; curdyn++) {
-        if (curdyn->d_tag == DT_NEEDED) {
-            loadELF(f->strtab + curdyn->d_un.d_val, instdir, 0);
-        }
-    }
+//    for (curdyn = f->dynamic; curdyn && curdyn->d_tag != DT_NULL; curdyn++) {
+//        if (curdyn->d_tag == DT_NEEDED) {
+//            loadELF(f->strtab + curdyn->d_un.d_val, instdir, 0);
+//        }
+//    }
 
     return f;
 }
@@ -278,153 +379,148 @@ void relocateELFs()
 void relocateELF(int fileNo, struct ELF_File *f)
 {
     /* do processor-specific relocation */
-#if GELFLOAD_ARCH_i386
 #define REL_P ((ssize_t) (currel->r_offset + f->offset))
-#define REL_S ((ssize_t) (findELFSymbol( \
-                f->strtab + f->symtab[ELFNATIVE_R_SYM(currel->r_info)].st_name, \
+#define REL_S32 ((ssize_t) (findELFSymbol32( \
+                f->strtab + f->symtab32[ELF32_R_SYM(currel->r_info)].st_name, \
                 NULL, fileNo, -1, NULL)))
-#define REL_A (*((ssize_t *) REL_P))
-#define WORD32_REL(to) REL_A = (ssize_t) (to)
-
-    /* we ought to have rel and symtab defined */
-    if (f->rel && f->symtab) {
-        ElfNative_Rel *currel = f->rel;
-        for (; (void *) currel < (void *) f->rel + f->relsz; currel++) {
-            switch (ELFNATIVE_R_TYPE(currel->r_info)) {
-                case R_386_32:
-                    WORD32_REL(REL_S + REL_A);
-                    break;
-
-                case R_386_PC32:
-                    WORD32_REL(REL_S + REL_A - REL_P);
-                    break;
-
-                case R_386_COPY:
-                {
-                    /* this is a bit more convoluted, as we need to find it in both places and copy */
-                    ElfNative_Sym *localsym, *sosym;
-                    localsym = &(f->symtab[ELFNATIVE_R_SYM(currel->r_info)]);
-                    void *soptr = findELFSymbol(
-                            f->strtab + localsym->st_name,
-                            NULL, -1, fileNo, &sosym);
-
-                    /* OK, we should have both, so copy it over */
-                    if (localsym && sosym) {
-                        memcpy((void *) (localsym->st_value + f->offset),
-                               soptr, sosym->st_size);
-                    } else {
-                        /* depend on localsym's size */
-                        memcpy((void *) (localsym->st_value + f->offset),
-                               soptr, localsym->st_size);
-
-                    }
-
-                    break;
-                }
-
-                case R_386_GLOB_DAT:
-                    WORD32_REL(REL_S + REL_A);
-                    break;
-
-                case R_386_RELATIVE:
-                    WORD32_REL(f->loc + REL_A);
-                    break;
-
-                default:
-                    fprintf(stderr, "Unsupported relocation %d in %s\n", ELFNATIVE_R_TYPE(currel->r_info), f->nm);
-            }
-        }
-    }
-
-    if (f->jmprel && f->symtab) {
-        ElfNative_Rel *currel = (ElfNative_Rel *) f->jmprel;
-        for (; (void *) currel < f->jmprel + f->jmprelsz; currel++) {
-            switch (ELFNATIVE_R_TYPE(currel->r_info)) {
-                case R_386_JMP_SLOT:
-                    WORD32_REL(REL_S);
-                    break;
-            }
-        }
-    }
-
-
-#elif GELFLOAD_ARCH_x86_64
-#define REL_P ((ssize_t) (currel->r_offset + f->offset))
-#define REL_S ((ssize_t) (findELFSymbol( \
-                f->strtab + f->symtab[ELFNATIVE_R_SYM(currel->r_info)].st_name, \
+#define REL_S64 ((ssize_t) (findELFSymbol64( \
+                f->strtab + f->symtab64[ELF64_R_SYM(currel->r_info)].st_name, \
                 NULL, fileNo, -1, NULL)))
 #define REL_A (*((ssize_t *) REL_P))
 #define WORD32_REL(to) REL_A = (int32_t) (to)
 #define WORD64_REL(to) REL_A = (ssize_t) (to)
 
     /* we ought to have rel and symtab defined */
-    if (f->rela && f->symtab) {
-        ElfNative_Rela *currel = f->rela;
-        for (; (void *) currel < (void *) f->rela + f->relasz; currel++) {
-            switch (ELFNATIVE_R_TYPE(currel->r_info)) {
-                case R_X86_64_64:
-                    WORD64_REL(REL_S + REL_A);
-                    break;
-
-                case R_X86_64_PC32:
-                    WORD32_REL(REL_S + REL_A - REL_P);
-                    break;
-
-                case R_X86_64_COPY:
-                {
-                    /* this is a bit more convoluted, as we need to find it in both places and copy */
-                    ElfNative_Sym *localsym, *sosym;
-                    localsym = &(f->symtab[ELFNATIVE_R_SYM(currel->r_info)]);
-                    void *soptr = findELFSymbol(
-                            f->strtab + localsym->st_name,
-                            NULL, -1, fileNo, &sosym);
-
-                    /* OK, we should have both, so copy it over */
-                    if (localsym && sosym) {
-                        memcpy((void *) (localsym->st_value + f->offset),
-                               soptr, sosym->st_size);
-                    } else {
-                        /* depend on localsym's size */
-                        memcpy((void *) (localsym->st_value + f->offset),
-                               soptr, localsym->st_size);
-
+    if (f->ehdr32) {
+        if (f->rela32 && f->symtab32) {
+            Elf32_Rela *currel = f->rela32;
+            for (; (void *) currel < (void *) f->rela32 + f->relasz; currel++) {
+                switch (ELF32_R_TYPE(currel->r_info)) {
+                    case R_X86_64_64:
+                        WORD64_REL(REL_S32 + REL_A);
+                        break;
+                        
+                    case R_X86_64_PC32:
+                        WORD32_REL(REL_S32 + REL_A - REL_P);
+                        break;
+                        
+                    case R_X86_64_COPY:
+                    {
+                        /* this is a bit more convoluted, as we need to find it in both places and copy */
+                        Elf32_Sym *localsym, *sosym;
+                        localsym = &(f->symtab32[ELF32_R_SYM(currel->r_info)]);
+                        void *soptr = findELFSymbol32(
+                                                    f->strtab + localsym->st_name,
+                                                    NULL, -1, fileNo, &sosym);
+                        
+                        /* OK, we should have both, so copy it over */
+                        if (localsym && sosym) {
+                            memcpy((void *) (localsym->st_value + f->offset),
+                                   soptr, sosym->st_size);
+                        } else {
+                            /* depend on localsym's size */
+                            memcpy((void *) (localsym->st_value + f->offset),
+                                   soptr, localsym->st_size);
+                            
+                        }
+                        
+                        break;
                     }
-
-                    break;
+                        
+                    case R_X86_64_GLOB_DAT:
+                        WORD64_REL(REL_S32 + REL_A);
+                        break;
+                        
+                    case R_X86_64_RELATIVE:
+                        WORD64_REL(f->loc + REL_A);
+                        break;
+                        
+                    default:
+                        fprintf(stderr, "Unsupported relocation %d in %s\n", (int) ELF32_R_TYPE(currel->r_info), f->nm);
                 }
-
-                case R_X86_64_GLOB_DAT:
-                    WORD64_REL(REL_S + REL_A);
-                    break;
-
-                case R_X86_64_RELATIVE:
-                    WORD64_REL(f->loc + REL_A);
-                    break;
-
-                default:
-                    fprintf(stderr, "Unsupported relocation %d in %s\n", (int) ELFNATIVE_R_TYPE(currel->r_info), f->nm);
+            }
+        }
+    } else {
+        if (f->rela64 && f->symtab64) {
+            Elf64_Rela *currel = f->rela64;
+            for (; (void *) currel < (void *) f->rela64 + f->relasz; currel++) {
+                switch (ELF64_R_TYPE(currel->r_info)) {
+                    case R_X86_64_64:
+                        WORD64_REL(REL_S64 + REL_A);
+                        break;
+                        
+                    case R_X86_64_PC32:
+                        WORD32_REL(REL_S64 + REL_A - REL_P);
+                        break;
+                        
+                    case R_X86_64_COPY:
+                    {
+                        /* this is a bit more convoluted, as we need to find it in both places and copy */
+                        Elf64_Sym *localsym, *sosym;
+                        localsym = &(f->symtab64[ELF64_R_SYM(currel->r_info)]);
+                        void *soptr = findELFSymbol64(
+                                                    f->strtab + localsym->st_name,
+                                                    NULL, -1, fileNo, &sosym);
+                        
+                        /* OK, we should have both, so copy it over */
+                        if (localsym && sosym) {
+                            memcpy((void *) (localsym->st_value + f->offset),
+                                   soptr, sosym->st_size);
+                        } else {
+                            /* depend on localsym's size */
+                            memcpy((void *) (localsym->st_value + f->offset),
+                                   soptr, localsym->st_size);
+                            
+                        }
+                        
+                        break;
+                    }
+                        
+                    case R_X86_64_GLOB_DAT:
+                        WORD64_REL(REL_S64 + REL_A);
+                        break;
+                        
+                    case R_X86_64_RELATIVE:
+                        WORD64_REL(f->loc + REL_A);
+                        break;
+                        
+                    default:
+                        fprintf(stderr, "Unsupported relocation %d in %s\n", (int) ELF64_R_TYPE(currel->r_info), f->nm);
+                }
             }
         }
     }
 
-    if (f->jmprel && f->symtab) {
-        ElfNative_Rela *currel = (ElfNative_Rela *) f->jmprel;
-        for (; (void *) currel < (void *) f->jmprel + f->jmprelsz; currel++) {
-            switch (ELFNATIVE_R_TYPE(currel->r_info)) {
-                case R_X86_64_JUMP_SLOT:
-                    WORD64_REL(REL_S);
-                    break;
 
-                default:
-                    fprintf(stderr, "Unsupported jmprel relocation %d in %s\n", (int) ELFNATIVE_R_TYPE(currel->r_info), f->nm);
+    if (f->ehdr32) {
+        if (f->jmprel && f->symtab32) {
+            Elf32_Rela *currel = (Elf32_Rela *) f->jmprel;
+            for (; (void *) currel < (void *) f->jmprel + f->jmprelsz; currel++) {
+                switch (ELF32_R_TYPE(currel->r_info)) {
+                    case R_X86_64_JUMP_SLOT:
+                        WORD64_REL(REL_S32);
+                        break;
+                        
+                    default:
+                        fprintf(stderr, "Unsupported jmprel relocation %d in %s\n", (int) ELF32_R_TYPE(currel->r_info), f->nm);
+                }
+            }
+        }
+    } else {
+        if (f->jmprel && f->symtab64) {
+            Elf64_Rela *currel = (Elf64_Rela *) f->jmprel;
+            for (; (void *) currel < (void *) f->jmprel + f->jmprelsz; currel++) {
+                switch (ELF64_R_TYPE(currel->r_info)) {
+                    case R_X86_64_JUMP_SLOT:
+                        WORD64_REL(REL_S64);
+                        break;
+                        
+                    default:
+                        fprintf(stderr, "Unsupported jmprel relocation %d in %s\n", (int) ELF64_R_TYPE(currel->r_info), f->nm);
+                }
             }
         }
     }
-
-
-#else
-#error Unsupported architecture.
-#endif
 }
 
 /* Initialize every ELF loaded /except/ for f (usually the binary) */
@@ -432,35 +528,56 @@ void initELF(struct ELF_File *except)
 {
     int i;
     struct ELF_File *f;
-    ElfNative_Dyn *dyn;
+    Elf32_Dyn *dyn32;
+    Elf64_Dyn *dyn64;
 
     for (i = elfFileCount - 1; i >= 0; i--) {
         f = &(elfFiles[i]);
         if (f == except) continue;
 
         /* init is in the dynamic section */
-        if (f->dynamic == NULL) continue;
-        for (dyn = f->dynamic; dyn && dyn->d_tag != DT_NULL; dyn++) {
-            if (dyn->d_tag == DT_INIT) {
-                /* call it */
-                ((void(*)()) (dyn->d_un.d_ptr + f->offset))();
-                break;
+        if (f->dynamic32 == NULL && f->dynamic64 == NULL) continue;
+        if (f->ehdr32) {
+            for (dyn32 = f->dynamic32; dyn32 && dyn32->d_tag != DT_NULL; dyn32++) {
+                if (dyn32->d_tag == DT_INIT) {
+                    /* call it */
+                    ((void(*)()) (dyn32->d_un.d_ptr + f->offset))();
+                    break;
+                }
             }
+        } else {
+            for (dyn64 = f->dynamic64; dyn64 && dyn64->d_tag != DT_NULL; dyn64++) {
+                if (dyn64->d_tag == DT_INIT) {
+                    /* call it */
+                    ((void(*)()) (dyn64->d_un.d_ptr + f->offset))();
+                    break;
+                }
+            }
+
         }
     }
+}
+
+void *findELFSymbol(const char *nm, struct ELF_File *onlyin, int localin, int notin)
+{
+    void *sym = findELFSymbol32(nm, onlyin, localin, notin, NULL);
+    if (sym == NULL) {
+        sym = findELFSymbol64(nm, onlyin, localin, notin, NULL);
+    }
+    return sym;
 }
 
 /* Find a symbol within the currently loaded ELF files
  * localin: The number of the current file, where STB_LOCAL symbols are OK
  * notin: Do not bind to symbols in this file 
  * Either can be -1 */
-void *findELFSymbol(const char *nm, struct ELF_File *onlyin, int localin, int notin, ElfNative_Sym **syminto)
+void *findELFSymbol32(const char *nm, struct ELF_File *onlyin, int localin, int notin, Elf32_Sym **syminto)
 {
     int i;
     struct ELF_File *f;
-    ElfNative_Word hash = elf_hash((unsigned char *) nm);
-    ElfNative_Word bucket, index;
-    ElfNative_Sym *sym;
+    Elf32_Word hash = elf_hash32((unsigned char *) nm);
+    Elf32_Word bucket, index;
+    Elf32_Sym *sym;
     void *hostsym;
     if (syminto) *syminto = NULL;
 
@@ -532,18 +649,18 @@ void *findELFSymbol(const char *nm, struct ELF_File *onlyin, int localin, int no
         }
 
         /* figure out the bucket ... */
-        bucket = hash % ELFFILE_NBUCKET(f);
+        bucket = hash % ELFFILE_NBUCKET32(f);
 
         /* then find the chain entry */
-        index = ELFFILE_BUCKET(f, bucket);
+        index = ELFFILE_BUCKET32(f, bucket);
 
         /* and work our way through the chain */
-        for (; index != STN_UNDEF; index = ELFFILE_CHAIN(f, index)) {
-            sym = &(f->symtab[index]);
+        for (; index != STN_UNDEF; index = ELFFILE_CHAIN32(f, index)) {
+            sym = &(f->symtab32[index]);
 
             /* see if it's defined */
             if (strcmp(f->strtab + sym->st_name, nm) == 0 &&
-                (i == localin || ELFNATIVE_ST_BIND(sym->st_info) != STB_LOCAL) &&
+                (i == localin || ELF32_ST_BIND(sym->st_info) != STB_LOCAL) &&
                 sym->st_shndx != SHN_UNDEF) {
                 /* we found our symbol! */
                 if (syminto != NULL) {
@@ -554,16 +671,138 @@ void *findELFSymbol(const char *nm, struct ELF_File *onlyin, int localin, int no
         }
     }
 
-    /* uh oh, not found! */
-    fprintf(stderr, "Symbol undefined: '%s'\n", nm);
-    return NULL;
+    hostsym = dlsym(RTLD_SELF, nm);
+    if (hostsym == NULL) {
+        fprintf(stderr, "Symbol undefined: '%s'\n", nm);
+    }
+    return hostsym;
+}
+
+void *findELFSymbol64(const char *nm, struct ELF_File *onlyin, int localin, int notin, Elf64_Sym **syminto)
+{
+    int i;
+    struct ELF_File *f;
+    Elf64_Word hash = elf_hash64((unsigned char *) nm);
+    Elf64_Word bucket, index;
+    Elf64_Sym *sym;
+    void *hostsym;
+    if (syminto) *syminto = NULL;
+    
+    if (nm[0] == '\0') return NULL;
+    
+    for (i = 0; i < elfFileCount; i++) {
+        if (i == notin) continue;
+        
+        f = &(elfFiles[i]);
+        if (onlyin && f != onlyin) continue;
+        
+        /* if this is a host library, just try the host method */
+        if (f->hostlib == HOSTLIB_HOST) {
+            char lsym[1024];
+            snprintf(lsym, 1024, "gelfload__%s", nm);
+            
+#if defined(HAVE_DLFCN_H)
+            hostsym = dlsym(f->prog, lsym);
+            if (hostsym) return hostsym;
+            hostsym = dlsym(f->prog, nm);
+            if (hostsym) return hostsym;
+            continue;
+#elif defined(__WIN64)
+            char csym[1024];
+            int isimp = 0;
+            
+            /* Remove _imp__ if it's present */
+            if (strncmp(nm, "_imp__", 6) == 0) {
+                isimp = 1;
+                nm += 6;
+                snprintf(lsym, 1024, "gelfload__%s", nm);
+            }
+            
+            /* Try adding a _ first, to get the cdecl version */
+            snprintf(csym, 1024, "_%s", lsym);
+            hostsym = GetProcAddress(f->prog, csym);
+            if (hostsym == NULL)
+                hostsym = GetProcAddress(f->prog, lsym);
+            if (hostsym == NULL) {
+                snprintf(csym, 1024, "_%s", nm);
+                hostsym = GetProcAddress(f->proc, csym);
+            }
+            if (hostsym == NULL)
+                hostsym = GetProcAddress(f->prog, nm);
+            if (hostsym) {
+                if (isimp) {
+                    /* Need a pointer to this pointer */
+                    void **pptr = (void **) malloc(sizeof(void*));
+                    if (pptr == NULL) {
+                        perror("malloc");
+                        exit(1);
+                    }
+                    *pptr = hostsym;
+                    return (void *) pptr;
+                    
+                } else {
+                    return hostsym;
+                    
+                }
+            }
+#endif
+            continue;
+            
+        } else if (f->hostlib == HOSTLIB_DL) {
+            hostsym = elfload_dl(nm);
+            if (hostsym) return hostsym;
+            continue;
+            
+        }
+        
+        /* figure out the bucket ... */
+        bucket = hash % ELFFILE_NBUCKET64(f);
+        
+        /* then find the chain entry */
+        index = ELFFILE_BUCKET64(f, bucket);
+        
+        /* and work our way through the chain */
+        for (; index != STN_UNDEF; index = ELFFILE_CHAIN64(f, index)) {
+            sym = &(f->symtab64[index]);
+            
+            /* see if it's defined */
+            if (strcmp(f->strtab + sym->st_name, nm) == 0 &&
+                (i == localin || ELF64_ST_BIND(sym->st_info) != STB_LOCAL) &&
+                sym->st_shndx != SHN_UNDEF) {
+                /* we found our symbol! */
+                if (syminto != NULL) {
+                    *syminto = sym;
+                }
+                return (void *) (sym->st_value + f->offset);
+            }
+        }
+    }
+    
+    hostsym = dlsym(RTLD_SELF, nm);
+    if (hostsym == NULL) {
+        fprintf(stderr, "Symbol undefined: '%s'\n", nm);
+    }
+    return hostsym;
 }
 
 /* The standard ELF hash function */
-ElfNative_Word elf_hash(const unsigned char *name)
+Elf32_Word elf_hash32(const unsigned char *name)
 {
-    ElfNative_Word h = 0, g;
+    Elf32_Word h = 0, g;
 
+    while (*name) {
+        h = (h << 4) + *name++;
+        if (g = h & 0xf0000000)
+            h ^= g >> 24;
+        h &= ~g;
+    }
+    return h;
+}
+
+Elf64_Word elf_hash64(const unsigned char *name)
+{
+    Elf64_Word h = 0, g;
+    
     while (*name) {
         h = (h << 4) + *name++;
         if (g = h & 0xf0000000)
